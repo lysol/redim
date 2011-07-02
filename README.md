@@ -7,6 +7,8 @@ Simple Redis models for simple Node.js projects.
 Getting started
 ---------------
 
+    npm install redim
+
 Javascript:
     
     var redim = require('redim');
