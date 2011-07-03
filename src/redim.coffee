@@ -1,17 +1,19 @@
 crypto = require 'crypto'
 redisModule = require 'redis'
-redis = undefined
 util = require 'util'
 salt = ""
 hashType = 'sha1'
+{forEach} = require 'async'
+redis = undefined
 
 hash = (text) ->
     ((crypto.createHash hashType).update text + salt).digest 'hex'
 
-createClient = (port, host, options) ->
-    redis = redisModule.createClient port, host, options
-auth = (password, callback) -> client.auth password, callback
-end = () -> redis.end()
+createClient = (port, host, options) =>
+    module.exports.redis = redisModule.createClient port, host, options
+    redis = module.exports.redis
+auth = (password, callback) -> redis.auth password, callback
+end = () => redis.end()
 
 class Model
     ###
@@ -38,23 +40,28 @@ class Model
     delete: (id, callback) ->
         i = 0
         prefix = "#{@modelName}:#{id}:"
-        rcall = (err) =>
-            if err?
-                console.log "Error at delete: #{err}"
-                callback err
-                return
 
-            if i < @fields.length
-                # if indexed, remove this ID from the index.
-                if @indexFields.indexOf(@fields[i]) + 1
-                    redis.get prefix + @fields[i], (err, data) =>
-                        if not err? and data?
-                            redis.lrem "#{@modelName}:#{@fields[i]}:#{data}", 1, id
-                i++
-                redis.del prefix + @fields[i - 1], rcall
+        rcall = (field, nextField) =>
+            passBack = () ->
+                redis.del prefix + field, (err) ->
+                    if err?
+                        throw err
+                    else
+                        nextField()
+            if field in @indexFields
+                @reIndex field, (res) ->
+                    if res? and res
+                        passBack()
+                    else
+                        throw "Reindexing failed."
+            else
+                passBack()
+
+        forEach @fields, rcall, (err) ->
+            if err?
+                throw err
             else
                 callback true
-        rcall()
     
     ###
     load method
@@ -71,16 +78,15 @@ class Model
         rcall = (err, data) =>
             i++
             if err?
-                console.log "Error at load: #{err}"
+                throw err
                 callback err
-                return
             else
                 if i < @fields.length
                     curfield = @fields[i]
                     robj[curfield] = data
                     redis.get prefix + @fields[i + 1], rcall
                 else
-                    attachSave robj
+                    @attachSave robj
                     callback robj
         redis.get prefix + @fields[0], rcall
 
@@ -96,13 +102,14 @@ class Model
         if @indexFields.indexOf field > -1
             redis.lrange "#{@modelName}:#{field}:#{value}", 0, -1, (err, data) =>
                 if err?
-                    console.log err
+                    throw err
+                    callback null
                 if err? or not data?
                     callback null
                     return
                 instances = []
                 i = 0
-                icb = (instance) ->
+                icb = (instance) =>
                     if instance?
                         instances.push instance
                         i++
@@ -124,16 +131,14 @@ class Model
     findBy: (field, value, callback) ->
         if @indexFields.indexOf field > -1
             # do stuff
-            redis.lrange "#{@modelName}:#{field}:#{value}", 0, 1, (err, data) =>
+            redis.lrange "#{@modelName}:#{field}:#{value}", 0, 0, (err, data) =>
                 if err?
-                    console.log err
-                if err? or not data?
+                    throw err
+                    callback err
+                if not data?
                     callback null
-                    return
-                if data.length == 1
-                    @load data[0], (instance) -> callback instance
                 else
-                    callback null
+                    @load data[0], (instance) -> callback instance
         else
             callback null
 
@@ -172,19 +177,26 @@ class Model
     ###
     attachSave: (instance) ->
         save = (callback) =>
-            i = 0
             prefix = "#{@modelName}:#{instance.id}:"
             numFields = @fields.length
-            rcall = (err) =>
+            rcall = (field, nextField) =>
+                redis.set prefix + field, instance[field], (err) =>
+                    if err?
+                        throw err
+                    else
+                        if field in @indexFields
+                            @reIndex field, (res) ->
+                                if res? and res
+                                    nextField()
+                                else
+                                    throw "Reindex failed"
+                        else
+                            nextField()
+            forEach @fields, rcall, (err) ->
                 if err?
-                    callback err
-                else if i < numFields
-                    curField = @fields[i]
-                    i++
-                    redis.set prefix + @fields[i - 1], instance[curField], rcall
+                    throw err
                 else
                     callback instance
-            rcall()
         instance.save = save
 
     ###
@@ -203,8 +215,66 @@ class Model
                 data.save (res) =>
                     callback res
             else
-                console.log "Error at create: #{err}"
-                callback err
+                throw err
+
+    ###
+    reIndex method
+
+    Rewrites an entire index from scratch. 
+    ###
+    reIndex: (field, callback) ->
+        indexKey = "#{@modelName}:#{field}"
+        redis.keys "#{indexKey}:*", (err, iKeys) =>
+            if err?
+                throw err
+            else
+                deleter = (key, fcallback2) =>
+                    redis.del key, (err) =>
+                        if err?
+                            throw err
+                        fcallback2()
+                passBack = () =>
+                    redis.keys "#{@modelName}:*:#{field}", (err, keys) =>
+                        indexer = (key, lcallback) =>
+                            tokens = key.split ':'
+                            id = tokens[1]
+                            redis.get key, (err, data) =>
+                                if not err? and data
+                                    redis.lpush "#{indexKey}:#{data}", id, (err) =>
+                                        if err?
+                                            throw err
+                                        lcallback()
+                                else if err?
+                                    throw err
+                                    lcallback()
+                        forEach keys, indexer, (err) =>
+                            if err?
+                                throw err
+                                callback false
+                            else
+                                callback true
+                if iKeys.length > 0
+                    forEach iKeys, deleter, (err) =>
+                        if err?
+                            throw err
+                        passBack()
+                else
+                    passBack()
+
+    ###
+    reIndexAll method
+
+    Rewrites all indexes from scratch.
+    ###
+    reIndexAll: (callback) ->
+        indexer = (field, fcallback) =>
+            @reIndex field, (res) =>
+                fcallback()
+        forEach @indexFields, indexer, (err) ->
+            if err
+                throw err
+            else
+                callback true
 
 module.exports.hashType = hashType
 module.exports.hash = hash

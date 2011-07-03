@@ -1,26 +1,39 @@
 { 
   "name": "redim",
-  "description": "Simple redis models",
-  "contributors": [{
-    "name": "Derek Arnold",
-    "email": "derek@derekarnold.net",
-    "web": "http://derekarnold.net"
-    }],
+  "author": "Derek Arnold",
+  "keywords": [
+    "redis",
+    "model",
+    "coffeescript"
+  ],
+  "description": "Simple Redis models for simple Node.js projects",
+  "contributors": [
+    {
+      "name": "Derek Arnold",
+      "email": "derek@derekarnold.net",
+      "web": "http://derekarnold.net"
+    }
+  ],
   "version": "0.0.1",
-  "licenses": [{
-    "type": "BSD",
-    "url": "http://github.com/lysol/redim/raw/master/LICENSE"
-  }],
+  "licenses": [
+    {
+      "type": "BSD",
+      "url": "http://github.com/lysol/redim/raw/master/LICENSE"
+    }
+  ],
   "main": "./lib/redim",
-  "repository": {
-    "type": "git",
-    "url": "http://github.com/lysol/redim.git"
-  },
+  "repositories": [
+    {
+      "type": "git",
+      "url": "http://github.com/lysol/redim.git"
+    }
+  ],
   "dependencies": {
     "redis": ">=0.6.4"
   },
   "devDependencies": {
     "coffee-script": ">= 1.1.1",
     "nodeunit": ">= 0.5.1",
+    "async": ">=0.1.9"
   }
 }
