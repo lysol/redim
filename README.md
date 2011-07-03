@@ -114,6 +114,33 @@ Coffeescript:
     newModel.findAllBy 'category', 'Meat Popsicle', (result) ->
         console.log result                  # Dumps a list of matching instances
 
+Pub/Sub
+-------
+
+Using Redis' PUBLISH and SUBSCRIBE support, you can attach events to operations
+on model instances (not object instances). Supported events are load, save and
+delete.
+
+Javascript:
+    
+    newModel.load(1, function (result) {
+        result.on('save', function(instance) {
+            console.log(instance.id);           // 1
+            console.log(instance.name);         // 'Dumpster person'
+        });
+        result.category = 'Dumpster person'
+        result.save(function(meaninglessResult) {});
+    });
+
+Coffeescript:
+    
+    newModel.load 1, (result) ->
+        result.on 'save', (instance) ->
+            console.log instance.id             # 1
+            console.log instance.name           # 'Dumpster person'
+        result.category = 'Dumpster person'
+        result.save (meaninglessResult) ->
+
 
 Passwords
 ---------
@@ -143,4 +170,4 @@ TODO
 * Relations
 * Pattern-based finds
 * Integrity checks
-* Pub/sub support of some kind
+* Wrap atomic operations in transactions

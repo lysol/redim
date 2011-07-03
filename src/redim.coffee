@@ -5,29 +5,69 @@ salt = ""
 hashType = 'sha1'
 {forEach} = require 'async'
 redis = undefined
+subscriber = undefined
+connectTuple = undefined
+
+# This is the list of callbacks for various pub/sub channels
+subListeners = {}
+subscribed = false
+
+# We keep track of what models have been created, so when an instance is passed
+# from the server, we know which one to tie it to and attach the appropriate methods
+modelRegistry = {}
+
+handleSubMessage = (channel, message) ->
+    newInstance = JSON.parse message
+    for key, cbList of subListeners
+        if key == channel
+            for cb in cbList
+                if newInstance.id? and newInstance._model? and modelRegistry[newInstance._model.name]?
+                    # It's an instance
+                    model = modelRegistry[newInstance._model.name]
+                    model.attachSave newInstance
+                    model.attachOn newInstance
+                    cb newInstance
+            return
+
+emitSubMessage = (event, instance) ->
+    channel = "#{instance._model.name}:#{instance.id}:#{event}"
+    redis.publish channel, JSON.stringify instance
+
+setOn = (channel, callback) ->
+    if not subscribed
+        subscriber.on "message", handleSubMessage
+    if not subListeners[channel]?
+        subListeners[channel] = []
+    subListeners[channel].push callback
+    subscriber.subscribe channel
+    return subListeners[channel].length - 1
 
 hash = (text) ->
     ((crypto.createHash hashType).update text + salt).digest 'hex'
 
 createClient = (port, host, options) =>
+    connectTuple = [port, host, options]
     module.exports.redis = redisModule.createClient port, host, options
+    subscriber = redisModule.createClient port, host, options
     redis = module.exports.redis
-auth = (password, callback) -> redis.auth password, callback
+auth = (password, callback) ->
+    subscriber.auth password, callback, () ->
+        redis.auth password, callback
 end = () => redis.end()
 
 class Model
     ###
     constructor
 
-    @modelName: The name that will be used as the first token of all keys
+    @name: The name that will be used as the first token of all keys
     @fields: The main fields that will be used for storage.
     @indexFields: You must include any fields you will be using to perform lookups.
     ###
-    constructor: (@modelName, @fields, @indexFields=[]) ->
+    constructor: (@name, @fields, @indexFields=[]) ->
         # set the id increment field
-
-        redis.get "#{@modelName}:id", (err, data) ->
-            redis.set "#{@modelName}:id", 1 if err?
+        redis.get "#{@name}:id", (err, data) =>
+            redis.set "#{@name}:id", 1 if err?
+            modelRegistry[@name] = @
     parent = @
 
     ###
@@ -39,29 +79,31 @@ class Model
     ###
     delete: (id, callback) ->
         i = 0
-        prefix = "#{@modelName}:#{id}:"
+        @load id, (origInstance) =>
+            prefix = "#{@name}:#{id}:"
 
-        rcall = (field, nextField) =>
-            passBack = () ->
-                redis.del prefix + field, (err) ->
-                    if err?
-                        throw err
-                    else
-                        nextField()
-            if field in @indexFields
-                @reIndex field, (res) ->
-                    if res? and res
-                        passBack()
-                    else
-                        throw "Reindexing failed."
-            else
-                passBack()
+            rcall = (field, nextField) =>
+                passBack = () ->
+                    redis.del prefix + field, (err) ->
+                        if err?
+                            throw err
+                        else
+                            nextField()
+                if field in @indexFields
+                    @reIndex field, (res) ->
+                        if res? and res
+                            passBack()
+                        else
+                            throw "Reindexing failed."
+                else
+                    passBack()
 
-        forEach @fields, rcall, (err) ->
-            if err?
-                throw err
-            else
-                callback true
+            forEach @fields, rcall, (err) =>
+                if err?
+                    throw err
+                else
+                    emitSubMessage 'delete', origInstance
+                    callback true
     
     ###
     load method
@@ -70,26 +112,30 @@ class Model
     callback: Called with either an instance of the object you are loading
               or the error returned by Redis.
     ###
+    
     load: (id, callback) ->
-        i = -1
-        prefix = "#{@modelName}:#{id}:"
         robj =
             "id": id
-        rcall = (err, data) =>
-            i++
+        prefix = "#{@name}:#{id}:"
+
+        rcall = (field, nextField) =>
+            redis.get "#{prefix}#{field}", (err, data) =>
+                if err?
+                    throw err
+                else
+                    robj[field] = data
+                nextField()
+
+        forEach @fields, rcall, (err) =>
             if err?
                 throw err
-                callback err
             else
-                if i < @fields.length
-                    curfield = @fields[i]
-                    robj[curfield] = data
-                    redis.get prefix + @fields[i + 1], rcall
-                else
-                    @attachSave robj
-                    callback robj
-        redis.get prefix + @fields[0], rcall
-
+                @attachSave robj
+                @attachOn robj
+                robj._model = @
+                emitSubMessage 'load', robj
+                callback robj
+    
     ###
     findAllBy method
     Returns all object instances with a specific value in a specific field.
@@ -100,7 +146,7 @@ class Model
     ###
     findAllBy: (field, value, callback) ->
         if @indexFields.indexOf field > -1
-            redis.lrange "#{@modelName}:#{field}:#{value}", 0, -1, (err, data) =>
+            redis.lrange "#{@name}:#{field}:#{value}", 0, -1, (err, data) =>
                 if err?
                     throw err
                     callback null
@@ -129,9 +175,9 @@ class Model
     callback: Called eitehr with the instance or a null response.
     ###
     findBy: (field, value, callback) ->
-        if @indexFields.indexOf field > -1
+        if field in @indexFields
             # do stuff
-            redis.lrange "#{@modelName}:#{field}:#{value}", 0, 0, (err, data) =>
+            redis.lrange "#{@name}:#{field}:#{value}", 0, 0, (err, data) =>
                 if err?
                     throw err
                     callback err
@@ -140,7 +186,7 @@ class Model
                 else
                     @load data[0], (instance) -> callback instance
         else
-            callback null
+            throw "Attempting to find using an unindexed field."
 
     ###
     loadAll method
@@ -152,7 +198,7 @@ class Model
     loadAll: (callback) ->
         i = 1
         maxI = -1
-        prefix = "#{@modelName}:id"
+        prefix = "#{@name}:id"
         robjs = []
         rcall = (data) =>
             robjs.push data if data?
@@ -170,6 +216,36 @@ class Model
                 callback err
 
     ###
+    attachOn method
+    Sets up the on method on instances.
+    instance: the thing
+    ###
+    attachOn: (instance) ->
+
+        buildChannel = (eventName) =>
+            "#{@name}:#{instance.id}:#{eventName}"
+
+        instance.on = (eventName, callback) =>
+            channel = buildChannel(eventName)
+            setOn channel, callback
+        
+        instance.removeListener = (eventName, index) =>
+            channel = buildChannel(eventName)
+            try
+                # gross, but this way the indexes still work
+                # if they remove another one later.
+                subListeners[channel][index] = () ->
+            catch err
+                throw "Could not remove listener: #{channel} #{index}"
+        
+        instance.removeListeners = (eventName) =>
+            channel = buildChannel(eventName)
+            try
+                subListeners[channel] = []
+            catch err
+                throw "No listeners were defined: #{channel}"
+
+    ###
     attachSave method
     Used by parts of the model that build instances to add a save method.
     This should not be used directly.
@@ -177,7 +253,7 @@ class Model
     ###
     attachSave: (instance) ->
         save = (callback) =>
-            prefix = "#{@modelName}:#{instance.id}:"
+            prefix = "#{@name}:#{instance.id}:"
             numFields = @fields.length
             rcall = (field, nextField) =>
                 redis.set prefix + field, instance[field], (err) =>
@@ -192,11 +268,13 @@ class Model
                                     throw "Reindex failed"
                         else
                             nextField()
-            forEach @fields, rcall, (err) ->
+            forEach @fields, rcall, (err) =>
                 if err?
                     throw err
                 else
+                    emitSubMessage 'save', instance
                     callback instance
+
         instance.save = save
 
     ###
@@ -208,11 +286,17 @@ class Model
               Redis returns.
     ###
     create: (data, callback) ->
-        redis.incr "#{@modelName}:id", (err, id) =>
+        newData = {}
+        for key, val of data
+            if key in @fields
+                newData[key] = val
+        redis.incr "#{@name}:id", (err, id) =>
             if not err?
-                data.id = id
-                @attachSave data
-                data.save (res) =>
+                newData.id = id
+                @attachSave newData
+                @attachOn newData
+                newData._model = @
+                newData.save (res) =>
                     callback res
             else
                 throw err
@@ -223,7 +307,7 @@ class Model
     Rewrites an entire index from scratch. 
     ###
     reIndex: (field, callback) ->
-        indexKey = "#{@modelName}:#{field}"
+        indexKey = "#{@name}:#{field}"
         redis.keys "#{indexKey}:*", (err, iKeys) =>
             if err?
                 throw err
@@ -234,7 +318,7 @@ class Model
                             throw err
                         fcallback2()
                 passBack = () =>
-                    redis.keys "#{@modelName}:*:#{field}", (err, keys) =>
+                    redis.keys "#{@name}:*:#{field}", (err, keys) =>
                         indexer = (key, lcallback) =>
                             tokens = key.split ':'
                             id = tokens[1]
