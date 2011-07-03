@@ -1,8 +1,9 @@
 redim
 =====
 
-Simple Redis models for simple Node.js projects.
-
+Redim is a simple Node.js ORM for Redis. The usual gamut of ORM operations
+is available, as well as model instance event listeners using Redis's
+PUBLISH/SUBSCRIBE functionality.
 
 Getting started
 ---------------
@@ -171,3 +172,4 @@ TODO
 * Pattern-based finds
 * Integrity checks
 * Wrap atomic operations in transactions
+* Add single-use model instance events
